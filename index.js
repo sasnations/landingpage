@@ -19,7 +19,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// MySQL connection pool
+// MySQL connection pool with better error handling
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -27,20 +27,29 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0
 });
 
-// Test database connection
+// Test database connection with detailed logging
 async function testConnection() {
   try {
     const connection = await pool.getConnection();
     console.log('\x1b[32m%s\x1b[0m', '✓ Database connection successful');
     console.log('Connected to MySQL database at:', process.env.DB_HOST);
+    console.log('Database:', process.env.DB_NAME);
+    console.log('User:', process.env.DB_USER);
     connection.release();
     return true;
   } catch (error) {
     console.error('\x1b[31m%s\x1b[0m', '✗ Database connection failed');
     console.error('Error details:', error.message);
+    console.error('Connection config:', {
+      host: process.env.DB_HOST,
+      user: process.env.DB_USER,
+      database: process.env.DB_NAME
+    });
     return false;
   }
 }
@@ -54,7 +63,8 @@ app.get('/api/status', async (req, res) => {
   res.json({
     status: isConnected ? 'connected' : 'disconnected',
     database: process.env.DB_NAME,
-    host: process.env.DB_HOST
+    host: process.env.DB_HOST,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -99,6 +109,11 @@ const isAdmin = async (req, res, next) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
     const [users] = await pool.query(
       'SELECT id, email, password, role FROM users WHERE email = ?',
       [email]
