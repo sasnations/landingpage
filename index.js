@@ -30,6 +30,34 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
+// Test database connection
+async function testConnection() {
+  try {
+    const connection = await pool.getConnection();
+    console.log('\x1b[32m%s\x1b[0m', '✓ Database connection successful');
+    console.log('Connected to MySQL database at:', process.env.DB_HOST);
+    connection.release();
+    return true;
+  } catch (error) {
+    console.error('\x1b[31m%s\x1b[0m', '✗ Database connection failed');
+    console.error('Error details:', error.message);
+    return false;
+  }
+}
+
+// Test connection on startup
+testConnection();
+
+// Database status endpoint
+app.get('/api/status', async (req, res) => {
+  const isConnected = await testConnection();
+  res.json({
+    status: isConnected ? 'connected' : 'disconnected',
+    database: process.env.DB_NAME,
+    host: process.env.DB_HOST
+  });
+});
+
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
