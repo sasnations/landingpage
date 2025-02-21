@@ -39,34 +39,17 @@ async function testConnection() {
     console.log('\x1b[32m%s\x1b[0m', '✓ Database connection successful');
     console.log('Connected to MySQL database at:', process.env.DB_HOST);
     console.log('Database:', process.env.DB_NAME);
-    console.log('User:', process.env.DB_USER);
     connection.release();
     return true;
   } catch (error) {
     console.error('\x1b[31m%s\x1b[0m', '✗ Database connection failed');
     console.error('Error details:', error.message);
-    console.error('Connection config:', {
-      host: process.env.DB_HOST,
-      user: process.env.DB_USER,
-      database: process.env.DB_NAME
-    });
     return false;
   }
 }
 
 // Test connection on startup
 testConnection();
-
-// Database status endpoint
-app.get('/api/status', async (req, res) => {
-  const isConnected = await testConnection();
-  res.json({
-    status: isConnected ? 'connected' : 'disconnected',
-    database: process.env.DB_NAME,
-    host: process.env.DB_HOST,
-    timestamp: new Date().toISOString()
-  });
-});
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
@@ -104,6 +87,16 @@ const isAdmin = async (req, res, next) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  const isConnected = await testConnection();
+  res.json({
+    status: isConnected ? 'healthy' : 'unhealthy',
+    database: isConnected ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Auth routes
 app.post('/api/auth/login', async (req, res) => {
@@ -354,6 +347,61 @@ app.post('/api/sections', authenticateToken, async (req, res) => {
     res.status(201).json(section[0]);
   } catch (error) {
     console.error('Error creating section:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/sections/:id', authenticateToken, async (req, res) => {
+  try {
+    const { type, content, order } = req.body;
+    
+    // Verify user owns the section through landing page
+    const [sections] = await pool.query(
+      `SELECT s.* FROM sections s
+       INNER JOIN landing_pages p ON s.landing_page_id = p.id
+       WHERE s.id = ? AND p.user_id = ?`,
+      [req.params.id, req.user.id]
+    );
+    
+    if (sections.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    await pool.query(
+      'UPDATE sections SET type = ?, content = ?, `order` = ? WHERE id = ?',
+      [type, JSON.stringify(content), order, req.params.id]
+    );
+    
+    const [updatedSection] = await pool.query(
+      'SELECT * FROM sections WHERE id = ?',
+      [req.params.id]
+    );
+    
+    res.json(updatedSection[0]);
+  } catch (error) {
+    console.error('Error updating section:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/sections/:id', authenticateToken, async (req, res) => {
+  try {
+    // Verify user owns the section through landing page
+    const [sections] = await pool.query(
+      `SELECT s.* FROM sections s
+       INNER JOIN landing_pages p ON s.landing_page_id = p.id
+       WHERE s.id = ? AND p.user_id = ?`,
+      [req.params.id, req.user.id]
+    );
+    
+    if (sections.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    await pool.query('DELETE FROM sections WHERE id = ?', [req.params.id]);
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting section:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
