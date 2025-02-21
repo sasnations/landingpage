@@ -9,7 +9,7 @@ dotenv.config();
 
 const app = express();
 
-// Configure CORS for production
+// Configure CORS
 const corsOptions = {
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
@@ -19,7 +19,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// MySQL connection pool with SSL for production
+// MySQL connection pool
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -27,15 +27,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
-  ssl: process.env.NODE_ENV === 'production' ? {
-    rejectUnauthorized: true
-  } : undefined
-});
-
-// Health check endpoint for Render
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy' });
+  queueLimit: 0
 });
 
 // Middleware to verify JWT token
@@ -56,11 +48,33 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Middleware to check if user is admin
+const isAdmin = async (req, res, next) => {
+  try {
+    const [users] = await pool.query(
+      'SELECT role FROM users WHERE id = ?',
+      [req.user.id]
+    );
+
+    if (users.length === 0 || users[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    next();
+  } catch (error) {
+    console.error('Error checking admin status:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 // Auth routes
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    const [users] = await pool.query(
+      'SELECT id, email, password, role FROM users WHERE email = ?',
+      [email]
+    );
     
     if (users.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -73,49 +87,44 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    const token = jwt.sign(
+      { id: user.id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role
+      }
+    });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// User management routes
-app.get('/api/users', authenticateToken, async (req, res) => {
+// User management routes (admin only)
+app.post('/api/users', authenticateToken, isAdmin, async (req, res) => {
   try {
-    // Only super admin can list users
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
+    const { email, password, role = 'user' } = req.body;
+
+    // Only admin can create other admins
+    if (role === 'admin' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized to create admin users' });
     }
 
-    const [users] = await pool.query(
-      'SELECT id, email, created_at FROM users ORDER BY created_at DESC'
-    );
-    res.json(users);
-  } catch (error) {
-    console.error('Error fetching users:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/users', authenticateToken, async (req, res) => {
-  try {
-    // Only super admin can create users
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    const { email, password } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
-
     const [result] = await pool.query(
-      'INSERT INTO users (email, password) VALUES (?, ?)',
-      [email, hashedPassword]
+      'INSERT INTO users (email, password, role) VALUES (?, ?, ?)',
+      [email, hashedPassword, role]
     );
 
     const [user] = await pool.query(
-      'SELECT id, email, created_at FROM users WHERE id = ?',
+      'SELECT id, email, role, created_at FROM users WHERE id = ?',
       [result.insertId]
     );
 
@@ -126,11 +135,37 @@ app.post('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
-app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+// Get all users (admin only)
+app.get('/api/users', authenticateToken, isAdmin, async (req, res) => {
   try {
-    // Only super admin can delete users
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
+    const [users] = await pool.query(
+      'SELECT id, email, role, created_at FROM users ORDER BY created_at DESC'
+    );
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete user (admin only)
+app.delete('/api/users/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    // Prevent deleting the last admin
+    const [admins] = await pool.query(
+      'SELECT COUNT(*) as count FROM users WHERE role = "admin"'
+    );
+    const [user] = await pool.query(
+      'SELECT role FROM users WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (
+      admins[0].count === 1 &&
+      user.length > 0 &&
+      user[0].role === 'admin'
+    ) {
+      return res.status(400).json({ error: 'Cannot delete the last admin user' });
     }
 
     await pool.query('DELETE FROM users WHERE id = ?', [req.params.id]);
@@ -144,10 +179,13 @@ app.delete('/api/users/:id', authenticateToken, async (req, res) => {
 // Landing pages routes
 app.get('/api/pages', authenticateToken, async (req, res) => {
   try {
-    const [pages] = await pool.query(
-      'SELECT * FROM landing_pages WHERE user_id = ? ORDER BY created_at DESC',
-      [req.user.id]
-    );
+    const query = req.user.role === 'admin'
+      ? 'SELECT * FROM landing_pages ORDER BY created_at DESC'
+      : 'SELECT * FROM landing_pages WHERE user_id = ? ORDER BY created_at DESC';
+    
+    const params = req.user.role === 'admin' ? [] : [req.user.id];
+    const [pages] = await pool.query(query, params);
+    
     res.json(pages);
   } catch (error) {
     console.error('Error fetching pages:', error);
